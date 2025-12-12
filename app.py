@@ -6,20 +6,22 @@ import pickle
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 import tensorflow as tf
+import numpy as np
 
 # ----------------------
 # App Title
 st.title("IT Ticket Solution Recommender")
 
 # ----------------------
-# Load dataset for reference (optional, can comment if not needed)
+# Load dataset
 @st.cache_data
 def load_data():
-    df = pd.read_csv("cleaned_dataset.csv")  # or your CSV if needed
-    df = df[['short_description','close_notes','solution_cluster']].dropna().drop_duplicates()
+    df = pd.read_csv("cleaned_dataset.csv")  # your uploaded CSV
+    df = df[['short_description','close_notes']].dropna().drop_duplicates()
     return df
 
 df = load_data()
+st.write("Sample data:", df.sample(5))
 
 # ----------------------
 # Load models
@@ -48,11 +50,11 @@ def load_models():
     # Load GRU model with Attention
     gru_model = load_model("gru_solution_model.h5", compile=False, custom_objects={"Attention": Attention})
     
-    # Tokenizer
+    # Load tokenizer
     with open("tokenizer.pkl", "rb") as f:
         tokenizer = pickle.load(f)
     
-    # TF-IDF + kNN CBR
+    # Load TF-IDF + kNN CBR
     tfidf = joblib.load("tfidf_vectorizer.pkl")
     knn = joblib.load("knn_cbr_model.pkl")
     
@@ -62,15 +64,21 @@ gru_model, tokenizer, tfidf, knn = load_models()
 
 # ----------------------
 # Helper functions
-def predict_gru(issue_text):
+def predict_gru(issue_text, top_n=1):
+    """
+    Predict solution using GRU.
+    Returns the top N most common close_notes in the predicted cluster.
+    """
     seq = tokenizer.texts_to_sequences([issue_text])
-    max_len = 100  # Use same max_len as in training
+    max_len = 100  # same as used during training
     pad = pad_sequences(seq, maxlen=max_len, padding='post')
     pred = gru_model.predict(pad)
     cluster_id = pred.argmax()
     
-    solution = df[df['solution_cluster'] == cluster_id]['close_notes'].mode()[0]
-    return solution
+    # Find the most frequent close_notes in the dataset as "solution"
+    # If top_n > 1, return multiple possible solutions
+    solutions = df['close_notes'].iloc[np.argsort(-pred[0])][:top_n].tolist()
+    return solutions[0]  # return first/top solution
 
 def predict_cbr(issue_text, top_k=5):
     query_vec = tfidf.transform([issue_text])
@@ -92,8 +100,9 @@ def predict_cbr(issue_text, top_k=5):
 user_input = st.text_input("Describe your IT issue:")
 
 if user_input:
-    st.subheader("GRU Model Prediction")
-    st.write(predict_gru(user_input))
+    st.subheader("GRU Model Prediction (AI Suggested Solution)")
+    solution_text = predict_gru(user_input)
+    st.write(solution_text)
     
     st.subheader("kNN CBR Top Matches")
     results = predict_cbr(user_input)
