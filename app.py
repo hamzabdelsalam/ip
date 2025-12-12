@@ -5,23 +5,54 @@ import joblib
 import pickle
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+import tensorflow as tf
 
 # ----------------------
 # App Title
-st.title("IT Ticket Solution Tester")
+st.title("IT Ticket Solution Recommender")
 
 # ----------------------
-# Load models and tokenizer
+# Load dataset for reference (optional, can comment if not needed)
+@st.cache_data
+def load_data():
+    df = pd.read_csv("cleaned_dataset.csv")  # or your CSV if needed
+    df = df[['short_description','close_notes','solution_cluster']].dropna().drop_duplicates()
+    return df
+
+df = load_data()
+
+# ----------------------
+# Load models
 @st.cache_resource
 def load_models():
-    # Load GRU model
-    gru_model = load_model("gru_solution_model.h5", compile=False)
+    # Custom Attention layer
+    class Attention(tf.keras.layers.Layer):
+        def __init__(self, **kwargs):
+            super(Attention, self).__init__(**kwargs)
+        
+        def build(self, input_shape):
+            self.W = self.add_weight(name='att_weight', shape=(input_shape[-1], input_shape[-1]),
+                                     initializer='random_normal', trainable=True)
+            self.b = self.add_weight(name='att_bias', shape=(input_shape[-1],),
+                                     initializer='zeros', trainable=True)
+            self.u = self.add_weight(name='att_u', shape=(input_shape[-1], 1),
+                                     initializer='random_normal', trainable=True)
+            super(Attention, self).build(input_shape)
+        
+        def call(self, inputs):
+            u_t = tf.tanh(tf.tensordot(inputs, self.W, axes=1) + self.b)
+            att = tf.nn.softmax(tf.tensordot(u_t, self.u, axes=1), axis=1)
+            output = tf.reduce_sum(inputs * att, axis=1)
+            return output
+
+    # Load GRU model with Attention
+    gru_model = load_model("gru_solution_model.h5", compile=False, custom_objects={"Attention": Attention})
     
-    # Load tokenizer
+    # Tokenizer
     with open("tokenizer.pkl", "rb") as f:
         tokenizer = pickle.load(f)
     
-    # Load TF-IDF + kNN CBR
+    # TF-IDF + kNN CBR
     tfidf = joblib.load("tfidf_vectorizer.pkl")
     knn = joblib.load("knn_cbr_model.pkl")
     
@@ -33,10 +64,13 @@ gru_model, tokenizer, tfidf, knn = load_models()
 # Helper functions
 def predict_gru(issue_text):
     seq = tokenizer.texts_to_sequences([issue_text])
-    pad = pad_sequences(seq, maxlen=tokenizer.num_words if hasattr(tokenizer, 'num_words') else 100, padding='post')
+    max_len = 100  # Use same max_len as in training
+    pad = pad_sequences(seq, maxlen=max_len, padding='post')
     pred = gru_model.predict(pad)
     cluster_id = pred.argmax()
-    return f"Predicted cluster ID: {cluster_id}"
+    
+    solution = df[df['solution_cluster'] == cluster_id]['close_notes'].mode()[0]
+    return solution
 
 def predict_cbr(issue_text, top_k=5):
     query_vec = tfidf.transform([issue_text])
@@ -44,24 +78,28 @@ def predict_cbr(issue_text, top_k=5):
     results = []
     for idx, dist in zip(indices[0], distances[0]):
         similarity = 1 - dist
+        issue = df.iloc[idx]['short_description']
+        solution = df.iloc[idx]['close_notes']
         results.append({
             "similarity": similarity,
-            "example_index": idx
+            "issue": issue,
+            "solution": solution
         })
     return results
 
 # ----------------------
 # User input
-user_input = st.text_input("Enter your IT issue:")
+user_input = st.text_input("Describe your IT issue:")
 
 if user_input:
     st.subheader("GRU Model Prediction")
     st.write(predict_gru(user_input))
     
     st.subheader("kNN CBR Top Matches")
-    cbr_results = predict_cbr(user_input)
-    for i, r in enumerate(cbr_results, 1):
+    results = predict_cbr(user_input)
+    for i, r in enumerate(results, 1):
         st.write(f"Match {i}:")
         st.write(f"- Similarity: {r['similarity']:.2f}")
-        st.write(f"- Example index in training data: {r['example_index']}")
+        st.write(f"- Issue: {r['issue']}")
+        st.write(f"- Solution: {r['solution']}")
         st.write("---")
