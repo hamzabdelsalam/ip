@@ -1,13 +1,11 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from collections import Counter
 import joblib
 import pickle
 import os
 import kagglehub
+from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 
 # ----------------------
@@ -55,19 +53,18 @@ df = load_data()
 st.write("Sample data:", df.sample(5))
 
 # ----------------------
-# Load models
+# Load models from uploaded folder
 @st.cache_resource
 def load_models():
-    # GRU model
-    from tensorflow.keras.models import load_model
-    gru_model = load_model("gru_solution_model.h5")
+    # GRU model (compile=False to avoid legacy H5 issues)
+    gru_model = load_model("gru_solution_model.h5", compile=False)
     # Tokenizer
     with open("tokenizer.pkl", "rb") as f:
         tokenizer = pickle.load(f)
     # TF-IDF + kNN
     tfidf = joblib.load("tfidf_vectorizer.pkl")
     knn = joblib.load("knn_cbr_model.pkl")
-    # KMeans clusters (if used)
+    # KMeans clusters
     kmeans = joblib.load("kmeans_cluster_model.pkl")
     return gru_model, tokenizer, tfidf, knn, kmeans
 
@@ -80,7 +77,6 @@ def predict_gru(issue_text):
     pad = pad_sequences(seq, maxlen=tokenizer.num_words if hasattr(tokenizer, 'num_words') else 100, padding='post')
     pred = gru_model.predict(pad)
     cluster_id = pred.argmax()
-    # Use kmeans cluster labels if available
     if 'solution_cluster' in df.columns:
         solution = df[df['solution_cluster'] == cluster_id]['close_notes'].mode()[0]
     else:
