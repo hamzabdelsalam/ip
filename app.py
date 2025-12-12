@@ -6,16 +6,38 @@ import seaborn as sns
 from collections import Counter
 import joblib
 import pickle
+import os
+import zipfile
+import kagglehub
 
 # ----------------------
 # App Title
 st.title("IT Ticket Solution Recommender")
 
 # ----------------------
-# Load data
+# Load data from Kaggle
 @st.cache_data
 def load_data():
-    df = pd.read_csv("synthetic-it-call-center-tickets.csv")
+    # Download dataset
+    path = kagglehub.dataset_download("kameronbrooks/synthetic-it-call-center-tickets-v1")
+    
+    # Extract CSV from ZIP
+    extract_path = "dataset_temp"
+    os.makedirs(extract_path, exist_ok=True)
+    with zipfile.ZipFile(path, 'r') as zip_ref:
+        zip_ref.extractall(extract_path)
+    
+    # Find CSV
+    csv_file = None
+    for file in os.listdir(extract_path):
+        if file.endswith(".csv"):
+            csv_file = os.path.join(extract_path, file)
+            break
+    if csv_file is None:
+        raise FileNotFoundError("No CSV file found in the downloaded dataset.")
+    
+    df = pd.read_csv(csv_file)
+    # Keep only needed columns
     df = df[['short_description','close_notes']].dropna().drop_duplicates()
     return df
 
@@ -50,7 +72,11 @@ def predict_gru(issue_text):
     pad = pad_sequences(seq, maxlen=tokenizer.num_words if hasattr(tokenizer, 'num_words') else 100, padding='post')
     pred = gru_model.predict(pad)
     cluster_id = pred.argmax()
-    solution = df[df['solution_cluster'] == cluster_id]['close_notes'].mode()[0]
+    # Use kmeans cluster labels if available
+    if 'solution_cluster' in df.columns:
+        solution = df[df['solution_cluster'] == cluster_id]['close_notes'].mode()[0]
+    else:
+        solution = df['close_notes'].mode()[0]
     return solution
 
 def predict_cbr(issue_text, top_k=5):
