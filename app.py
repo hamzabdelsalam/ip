@@ -15,7 +15,7 @@ from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.layers import Layer
 
 # ==========================================
-# 1. SETUP & CONFIGURATION
+# 1. SETUP & CONFIGURATION (CRITICAL FIX)
 # ==========================================
 st.set_page_config(
     page_title="IT Helpdesk AI", 
@@ -23,30 +23,45 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- CRITICAL NLTK FIX: Force Download ---
+# --- CRITICAL NLTK FIX: Setting Data Path ---
 @st.cache_resource
 def setup_nltk_and_download_resources():
-    """Forces the download of necessary NLTK components and caches the result."""
-    try:
-        packages = ['stopwords', 'wordnet', 'averaged_perceptron_tagger']
+    """
+    Forces the download of necessary NLTK components into a 
+    specific, user-writable directory and sets the NLTK data path.
+    This resolves persistent LookupErrors in cloud environments.
+    """
+    # Define a custom directory for NLTK data (e.g., inside the app root)
+    NLTK_DATA_DIR = os.path.join(os.getcwd(), ".nltk_data")
+    
+    # 1. Create the directory if it doesn't exist
+    if not os.path.exists(NLTK_DATA_DIR):
+        os.makedirs(NLTK_DATA_DIR)
         
-        for package in packages:
-            try:
-                # Check if package is already downloaded
-                nltk.data.find(f'tokenizers/{package}') # Use a generic path check
-            except LookupError:
-                # If not found, download it
-                nltk.download(package, quiet=True)
-        # We need the tagger data itself, which is often 'averaged_perceptron_tagger'
+    # 2. Tell NLTK to look in this directory
+    if NLTK_DATA_DIR not in nltk.data.path:
+        nltk.data.path.append(NLTK_DATA_DIR)
+        
+    # 3. Download the packages, specifying the new directory
+    packages = ['stopwords', 'wordnet', 'averaged_perceptron_tagger']
+    
+    for package in packages:
         try:
-             nltk.data.find('taggers/averaged_perceptron_tagger')
+            # Check if package is already downloaded in the new location
+            # We use a known path to check for presence
+            nltk.data.find(f'taggers/{package}') 
         except LookupError:
-             nltk.download('averaged_perceptron_tagger', quiet=True)
+            # Download it to the specified directory
+            nltk.download(package, download_dir=NLTK_DATA_DIR, quiet=True)
 
-        st.success("NLTK resources loaded successfully.")
-    except Exception as e:
-        st.error(f"Failed to download NLTK resources. Please check your internet connection or environment. Error: {e}")
+    # Final check for the specific resource that keeps failing
+    try:
+        nltk.data.find('taggers/averaged_perceptron_tagger')
+        st.success("NLTK resources (including POS Tagger) loaded successfully.")
+    except LookupError:
+        st.error("FATAL ERROR: 'averaged_perceptron_tagger' is still missing. Please ensure internet access and permissions.")
         st.stop()
+
 
 # Call the setup function immediately
 setup_nltk_and_download_resources()
@@ -78,7 +93,7 @@ def clean_text(text):
     stops = set(stopwords.words('english'))
     words = [word for word in words if word not in stops]
     
-    # 4. POS Tagging (Requires 'averaged_perceptron_tagger')
+    # 4. POS Tagging (Source of the LookupError, now should be fixed)
     pos_tags = pos_tag(words)
     
     # 5. Lemmatization
@@ -87,6 +102,7 @@ def clean_text(text):
     return ' '.join(lemmatized)
 
 # --- CUSTOM ATTENTION LAYER ---
+# Must match the class definition used during model training
 class Attention(Layer):
     def __init__(self, **kwargs):
         super(Attention, self).__init__(**kwargs)
@@ -138,7 +154,7 @@ def load_all_models():
     tfidf = joblib.load("tfidf_vectorizer.pkl")
     knn = joblib.load("knn_cbr_model.pkl")
 
-    # Load GRU Model
+    # Load GRU Model (with custom object)
     model = load_model("gru_solution_model.h5", custom_objects={'Attention': Attention})
     
     return df, max_len, tokenizer, tfidf, knn, model
@@ -151,7 +167,6 @@ df, max_len, tokenizer, tfidf, knn, model = load_all_models()
 # ==========================================
 def predict_solution_gru(text):
     """Deep Learning prediction using GRU + Attention"""
-    # The clean_text function is the source of the LookupError
     cleaned = clean_text(text)
     seq = tokenizer.texts_to_sequences([cleaned])
     pad = pad_sequences(seq, maxlen=max_len, padding='post')
