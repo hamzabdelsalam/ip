@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.layers import Layer # <-- Explicitly imported here!
 import joblib
 import pickle
 import re
@@ -9,8 +12,6 @@ import nltk
 import os
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-# NOTE: Removed 'wordnet' and 'pos_tag' imports as they are no longer strictly needed for this simplified text cleaning.
-
 # ==========================================
 # 1. SETUP & CONFIGURATION (CRITICAL FIX)
 # ==========================================
@@ -20,34 +21,32 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- NLTK Setup (Simplified) ---
-# We only download stopwords and wordnet for the lemmatizer now.
+# --- NLTK Setup ---
 @st.cache_resource
 def setup_nltk_and_download_resources():
-    try:
-        packages = ['stopwords', 'wordnet'] 
+    NLTK_DATA_DIR = os.path.join(os.getcwd(), ".nltk_data")
+    
+    if not os.path.exists(NLTK_DATA_DIR):
+        os.makedirs(NLTK_DATA_DIR)
         
-        # Define a custom directory for NLTK data (e.g., inside the app root)
-        NLTK_DATA_DIR = os.path.join(os.getcwd(), ".nltk_data")
-        if not os.path.exists(NLTK_DATA_DIR):
-            os.makedirs(NLTK_DATA_DIR)
-        if NLTK_DATA_DIR not in nltk.data.path:
-            nltk.data.path.append(NLTK_DATA_DIR)
-            
-        for package in packages:
-            try:
-                # Check for package presence
-                nltk.data.find(f'corpora/{package}')
-            except LookupError:
-                # Download it to the specified directory
-                nltk.download(package, download_dir=NLTK_DATA_DIR, quiet=True)
+    if NLTK_DATA_DIR not in nltk.data.path:
+        nltk.data.path.append(NLTK_DATA_DIR)
+        
+    packages = ['stopwords', 'wordnet'] 
+    
+    for package in packages:
+        try:
+            nltk.data.find(f'corpora/{package}')
+        except LookupError:
+            nltk.download(package, download_dir=NLTK_DATA_DIR, quiet=True)
 
+    try:
+        nltk.data.find('corpora/stopwords')
         st.success("NLTK resources loaded successfully (POS Tagger removed for stability).")
-    except Exception as e:
-        st.error(f"Failed to download NLTK resources: {e}")
+    except LookupError:
+        st.error("FATAL ERROR: NLTK stopwords missing.")
         st.stop()
 
-# Call the setup function immediately
 setup_nltk_and_download_resources()
 
 # ==========================================
@@ -55,30 +54,25 @@ setup_nltk_and_download_resources()
 # ==========================================
 lemmatizer = WordNetLemmatizer()
 
-# NOTE: get_wordnet_pos is REMOVED as it requires the failing POS Tagger
-
 def clean_text(text):
     if not isinstance(text, str): return ""
     
-    # 1. Lowercase and remove punctuation
     text = text.lower()
     text = re.sub(r'[^\w\s]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
-    
-    # 2. Tokenize
     words = text.split()
     
-    # 3. Remove Stopwords
     stops = set(stopwords.words('english'))
     words = [word for word in words if word not in stops]
     
-    # 4. Lemmatization (Simplified - treats all words as Noun by default)
-    # THIS STEP NO LONGER CALLS THE FAILING POS TAGGER
+    # Simplified Lemmatization
     lemmatized = [lemmatizer.lemmatize(word) for word in words] 
     
     return ' '.join(lemmatized)
 
 # --- CUSTOM ATTENTION LAYER ---
+# This class needs 'Layer' and 'tensorflow' (tf) to be defined before it.
+# Moving the imports to the top ensures this.
 class Attention(Layer):
     def __init__(self, **kwargs):
         super(Attention, self).__init__(**kwargs)
@@ -103,7 +97,6 @@ class Attention(Layer):
 # ==========================================
 @st.cache_resource
 def load_all_models():
-    # Helper to check if file exists
     required_files = [
         "processed_tickets.csv", "metadata.pkl", "tokenizer.pkl", 
         "tfidf_vectorizer.pkl", "knn_cbr_model.pkl", "gru_solution_model.h5"
@@ -114,19 +107,15 @@ def load_all_models():
             st.error(f"Missing file: {f}. Please run the export script in your notebook and ensure all files are in the same directory.")
             st.stop()
 
-    # Load Data
     df = pd.read_csv("processed_tickets.csv")
     
-    # Load Metadata
     with open("metadata.pkl", "rb") as f:
         meta = pickle.load(f)
         max_len = meta['max_len']
 
-    # Load Tokenizer
     with open("tokenizer.pkl", "rb") as f:
         tokenizer = pickle.load(f)
 
-    # Load TF-IDF & KNN
     tfidf = joblib.load("tfidf_vectorizer.pkl")
     knn = joblib.load("knn_cbr_model.pkl")
 
@@ -142,26 +131,20 @@ df, max_len, tokenizer, tfidf, knn, model = load_all_models()
 # 4. PREDICTION LOGIC
 # ==========================================
 def predict_solution_gru(text):
-    """Deep Learning prediction using GRU + Attention"""
-    # This calls the modified clean_text function
     cleaned = clean_text(text) 
     seq = tokenizer.texts_to_sequences([cleaned])
     pad = pad_sequences(seq, maxlen=max_len, padding='post')
     
-    # Use model.predict, suppress output
     with st.spinner('Predicting cluster...'):
         pred = model.predict(pad, verbose=0)
     
     cluster_id = pred.argmax()
     confidence = np.max(pred) * 100
     
-    # Get most frequent solution for this cluster
     suggested_fix = df[df['solution_cluster'] == cluster_id]['close_notes'].mode()[0]
     return suggested_fix, confidence
 
 def get_similar_cases_knn(text, k=3):
-    """Case-Based Reasoning using KNN"""
-    # This calls the modified clean_text function
     cleaned = clean_text(text) 
     query_vec = tfidf.transform([cleaned])
     distances, indices = knn.kneighbors(query_vec, n_neighbors=k)
