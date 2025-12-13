@@ -7,12 +7,9 @@ import pickle
 import re
 import nltk
 import os
-from nltk.corpus import stopwords, wordnet
+from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-from nltk import pos_tag
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.layers import Layer
+# NOTE: Removed 'wordnet' and 'pos_tag' imports as they are no longer strictly needed for this simplified text cleaning.
 
 # ==========================================
 # 1. SETUP & CONFIGURATION (CRITICAL FIX)
@@ -23,45 +20,32 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- CRITICAL NLTK FIX: Setting Data Path ---
+# --- NLTK Setup (Simplified) ---
+# We only download stopwords and wordnet for the lemmatizer now.
 @st.cache_resource
 def setup_nltk_and_download_resources():
-    """
-    Forces the download of necessary NLTK components into a 
-    specific, user-writable directory and sets the NLTK data path.
-    This resolves persistent LookupErrors in cloud environments.
-    """
-    # Define a custom directory for NLTK data (e.g., inside the app root)
-    NLTK_DATA_DIR = os.path.join(os.getcwd(), ".nltk_data")
-    
-    # 1. Create the directory if it doesn't exist
-    if not os.path.exists(NLTK_DATA_DIR):
-        os.makedirs(NLTK_DATA_DIR)
-        
-    # 2. Tell NLTK to look in this directory
-    if NLTK_DATA_DIR not in nltk.data.path:
-        nltk.data.path.append(NLTK_DATA_DIR)
-        
-    # 3. Download the packages, specifying the new directory
-    packages = ['stopwords', 'wordnet', 'averaged_perceptron_tagger']
-    
-    for package in packages:
-        try:
-            # Check if package is already downloaded in the new location
-            # We use a known path to check for presence
-            nltk.data.find(f'taggers/{package}') 
-        except LookupError:
-            # Download it to the specified directory
-            nltk.download(package, download_dir=NLTK_DATA_DIR, quiet=True)
-
-    # Final check for the specific resource that keeps failing
     try:
-        nltk.data.find('taggers/averaged_perceptron_tagger')
-        st.success("NLTK resources (including POS Tagger) loaded successfully.")
-    except LookupError:
-        st.error("FATAL ERROR: 'averaged_perceptron_tagger' is still missing. Please ensure internet access and permissions.")
-        st.stop()
+        packages = ['stopwords', 'wordnet'] 
+        
+        # Define a custom directory for NLTK data (e.g., inside the app root)
+        NLTK_DATA_DIR = os.path.join(os.getcwd(), ".nltk_data")
+        if not os.path.exists(NLTK_DATA_DIR):
+            os.makedirs(NLTK_DATA_DIR)
+        if NLTK_DATA_DIR not in nltk.data.path:
+            nltk.data.path.append(NLTK_DATA_DIR)
+            
+        for package in packages:
+            try:
+                # Check for package presence
+                nltk.data.find(f'corpora/{package}')
+            except LookupError:
+                # Download it to the specified directory
+                nltk.download(package, download_dir=NLTK_DATA_DIR, quiet=True)
 
+        st.success("NLTK resources loaded successfully (POS Tagger removed for stability).")
+    except Exception as e:
+        st.error(f"Failed to download NLTK resources: {e}")
+        st.stop()
 
 # Call the setup function immediately
 setup_nltk_and_download_resources()
@@ -71,12 +55,7 @@ setup_nltk_and_download_resources()
 # ==========================================
 lemmatizer = WordNetLemmatizer()
 
-def get_wordnet_pos(tag):
-    if tag.startswith('J'): return wordnet.ADJ
-    elif tag.startswith('V'): return wordnet.VERB
-    elif tag.startswith('N'): return wordnet.NOUN
-    elif tag.startswith('R'): return wordnet.ADV
-    else: return wordnet.NOUN
+# NOTE: get_wordnet_pos is REMOVED as it requires the failing POS Tagger
 
 def clean_text(text):
     if not isinstance(text, str): return ""
@@ -93,16 +72,13 @@ def clean_text(text):
     stops = set(stopwords.words('english'))
     words = [word for word in words if word not in stops]
     
-    # 4. POS Tagging (Source of the LookupError, now should be fixed)
-    pos_tags = pos_tag(words)
-    
-    # 5. Lemmatization
-    lemmatized = [lemmatizer.lemmatize(word, get_wordnet_pos(tag)) for word, tag in pos_tags]
+    # 4. Lemmatization (Simplified - treats all words as Noun by default)
+    # THIS STEP NO LONGER CALLS THE FAILING POS TAGGER
+    lemmatized = [lemmatizer.lemmatize(word) for word in words] 
     
     return ' '.join(lemmatized)
 
 # --- CUSTOM ATTENTION LAYER ---
-# Must match the class definition used during model training
 class Attention(Layer):
     def __init__(self, **kwargs):
         super(Attention, self).__init__(**kwargs)
@@ -167,7 +143,8 @@ df, max_len, tokenizer, tfidf, knn, model = load_all_models()
 # ==========================================
 def predict_solution_gru(text):
     """Deep Learning prediction using GRU + Attention"""
-    cleaned = clean_text(text)
+    # This calls the modified clean_text function
+    cleaned = clean_text(text) 
     seq = tokenizer.texts_to_sequences([cleaned])
     pad = pad_sequences(seq, maxlen=max_len, padding='post')
     
@@ -184,7 +161,8 @@ def predict_solution_gru(text):
 
 def get_similar_cases_knn(text, k=3):
     """Case-Based Reasoning using KNN"""
-    cleaned = clean_text(text)
+    # This calls the modified clean_text function
+    cleaned = clean_text(text) 
     query_vec = tfidf.transform([cleaned])
     distances, indices = knn.kneighbors(query_vec, n_neighbors=k)
     
@@ -247,11 +225,11 @@ st.sidebar.metric("Total Historical Tickets", len(df))
 st.sidebar.markdown("### 🛠️ Model Architecture")
 st.sidebar.info(
     """
-    **1. Neural Network:** A **GRU** (Gated Recurrent Unit) model with an **Attention Layer**  classifies the input issue into 30 solution clusters.
+    **1. Neural Network:** A **GRU** model with an **Attention Layer**  classifies the input issue into 30 solution clusters.
     
     **2. Vector Search:** A **k-Nearest Neighbors (KNN)** model 
 
-[Image of k-Nearest Neighbors clustering]
- uses **TF-IDF** (Term Frequency-Inverse Document Frequency) to find the most similar historical tickets.
+[Image of k-Nearest Neighbors diagram]
+ uses **TF-IDF** to find the most similar historical tickets.
     """
 )
