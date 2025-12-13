@@ -23,27 +23,33 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- ROBUST NLTK DOWNLOADER (Fixes the LookupError) ---
+# --- CRITICAL NLTK FIX: Force Download ---
 @st.cache_resource
-def setup_nltk():
-    """
-    Explicitly checks for and downloads required NLTK resources.
-    Uses specific paths to avoid false positives.
-    """
-    # Dictionary of 'nltk_data_path': 'download_name'
-    required_resources = {
-        'corpora/stopwords': 'stopwords',
-        'corpora/wordnet': 'wordnet',
-        'taggers/averaged_perceptron_tagger': 'averaged_perceptron_tagger'
-    }
-
-    for path, download_name in required_resources.items():
+def setup_nltk_and_download_resources():
+    """Forces the download of necessary NLTK components and caches the result."""
+    try:
+        packages = ['stopwords', 'wordnet', 'averaged_perceptron_tagger']
+        
+        for package in packages:
+            try:
+                # Check if package is already downloaded
+                nltk.data.find(f'tokenizers/{package}') # Use a generic path check
+            except LookupError:
+                # If not found, download it
+                nltk.download(package, quiet=True)
+        # We need the tagger data itself, which is often 'averaged_perceptron_tagger'
         try:
-            nltk.data.find(path)
+             nltk.data.find('taggers/averaged_perceptron_tagger')
         except LookupError:
-            nltk.download(download_name, quiet=True)
+             nltk.download('averaged_perceptron_tagger', quiet=True)
 
-setup_nltk()
+        st.success("NLTK resources loaded successfully.")
+    except Exception as e:
+        st.error(f"Failed to download NLTK resources. Please check your internet connection or environment. Error: {e}")
+        st.stop()
+
+# Call the setup function immediately
+setup_nltk_and_download_resources()
 
 # ==========================================
 # 2. UTILITY FUNCTIONS (Preprocessing)
@@ -69,11 +75,10 @@ def clean_text(text):
     words = text.split()
     
     # 3. Remove Stopwords
-    # We load stopwords inside the function to ensure resource exists
     stops = set(stopwords.words('english'))
     words = [word for word in words if word not in stops]
     
-    # 4. POS Tagging (This caused your error before, now fixed)
+    # 4. POS Tagging (Requires 'averaged_perceptron_tagger')
     pos_tags = pos_tag(words)
     
     # 5. Lemmatization
@@ -82,7 +87,6 @@ def clean_text(text):
     return ' '.join(lemmatized)
 
 # --- CUSTOM ATTENTION LAYER ---
-# Must exactly match the class used in the Jupyter Notebook training
 class Attention(Layer):
     def __init__(self, **kwargs):
         super(Attention, self).__init__(**kwargs)
@@ -97,11 +101,8 @@ class Attention(Layer):
         super(Attention, self).build(input_shape)
     
     def call(self, inputs):
-        # u_t = tanh(W.h + b)
         u_t = tf.tanh(tf.tensordot(inputs, self.W, axes=1) + self.b)
-        # attention scores
         att = tf.nn.softmax(tf.tensordot(u_t, self.u, axes=1), axis=1)
-        # weighted sum of inputs
         output = tf.reduce_sum(inputs * att, axis=1)
         return output
 
@@ -118,7 +119,7 @@ def load_all_models():
     
     for f in required_files:
         if not os.path.exists(f):
-            st.error(f"Missing file: {f}. Please run the export script in your notebook.")
+            st.error(f"Missing file: {f}. Please run the export script in your notebook and ensure all files are in the same directory.")
             st.stop()
 
     # Load Data
@@ -150,11 +151,15 @@ df, max_len, tokenizer, tfidf, knn, model = load_all_models()
 # ==========================================
 def predict_solution_gru(text):
     """Deep Learning prediction using GRU + Attention"""
+    # The clean_text function is the source of the LookupError
     cleaned = clean_text(text)
     seq = tokenizer.texts_to_sequences([cleaned])
     pad = pad_sequences(seq, maxlen=max_len, padding='post')
     
-    pred = model.predict(pad)
+    # Use model.predict, suppress output
+    with st.spinner('Predicting cluster...'):
+        pred = model.predict(pad, verbose=0)
+    
     cluster_id = pred.argmax()
     confidence = np.max(pred) * 100
     
@@ -191,19 +196,22 @@ if st.button("Analyze Ticket", type="primary"):
     if not user_input:
         st.warning("Please enter a description first.")
     else:
-        with st.spinner("Analyzing..."):
+        st.markdown("---")
+        with st.spinner("Running AI Analysis..."):
             
             # --- Method 1: Deep Learning Prediction ---
             st.subheader("🧠 Recommended Solution (AI Model)")
             prediction, confidence = predict_solution_gru(user_input)
             
             # Visual indicator of confidence
-            if confidence > 80:
-                st.success(f"High Confidence: {confidence:.1f}%")
-            elif confidence > 50:
-                st.warning(f"Medium Confidence: {confidence:.1f}%")
-            else:
-                st.error(f"Low Confidence: {confidence:.1f}%")
+            col_conf, col_gap = st.columns([1, 3])
+            with col_conf:
+                if confidence > 80:
+                    st.success(f"High Confidence: {confidence:.1f}%")
+                elif confidence > 50:
+                    st.warning(f"Medium Confidence: {confidence:.1f}%")
+                else:
+                    st.error(f"Low Confidence: {confidence:.1f}%")
             
             st.info(f"**Resolution Step:**\n\n{prediction}")
             
@@ -215,17 +223,20 @@ if st.button("Analyze Ticket", type="primary"):
             
             for i, (sim, issue, sol) in enumerate(similar_cases):
                 with st.expander(f"Case #{i+1} (Similarity: {sim:.1f}%)"):
-                    st.markdown(f"**Original Issue:** {issue}")
-                    st.markdown(f"**Resolution:** {sol}")
+                    st.markdown(f"**Original Issue (Pre-processed):** {issue}")
+                    st.markdown(f"**Resolution (Pre-processed):** {sol}")
 
 # Sidebar
 st.sidebar.header("System Stats")
 st.sidebar.metric("Total Historical Tickets", len(df))
-st.sidebar.markdown("### How it works")
+st.sidebar.markdown("### 🛠️ Model Architecture")
 st.sidebar.info(
     """
-    **1. Neural Network:** A GRU model understands the sequence of your words to predict the category of the problem.
+    **1. Neural Network:** A **GRU** (Gated Recurrent Unit) model with an **Attention Layer**  classifies the input issue into 30 solution clusters.
     
-    **2. Vector Search:** A KNN algorithm compares your text mathematically to thousands of past tickets to find the closest match.
+    **2. Vector Search:** A **k-Nearest Neighbors (KNN)** model 
+
+[Image of k-Nearest Neighbors clustering]
+ uses **TF-IDF** (Term Frequency-Inverse Document Frequency) to find the most similar historical tickets.
     """
 )
