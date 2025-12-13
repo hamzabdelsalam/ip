@@ -6,6 +6,7 @@ import joblib
 import pickle
 import re
 import nltk
+import os
 from nltk.corpus import stopwords, wordnet
 from nltk.stem import WordNetLemmatizer
 from nltk import pos_tag
@@ -16,24 +17,37 @@ from tensorflow.keras.layers import Layer
 # ==========================================
 # 1. SETUP & CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="IT Helpdesk AI", layout="wide")
+st.set_page_config(
+    page_title="IT Helpdesk AI", 
+    page_icon="🤖",
+    layout="wide"
+)
 
-# Download NLTK data (cached to avoid redownloading)
+# --- ROBUST NLTK DOWNLOADER (Fixes the LookupError) ---
 @st.cache_resource
-def download_nltk_data():
-    try:
-        nltk.data.find('corpora/stopwords')
-    except LookupError:
-        nltk.download('stopwords')
-        nltk.download('wordnet')
-        nltk.download('averaged_perceptron_tagger')
+def setup_nltk():
+    """
+    Explicitly checks for and downloads required NLTK resources.
+    Uses specific paths to avoid false positives.
+    """
+    # Dictionary of 'nltk_data_path': 'download_name'
+    required_resources = {
+        'corpora/stopwords': 'stopwords',
+        'corpora/wordnet': 'wordnet',
+        'taggers/averaged_perceptron_tagger': 'averaged_perceptron_tagger'
+    }
 
-download_nltk_data()
+    for path, download_name in required_resources.items():
+        try:
+            nltk.data.find(path)
+        except LookupError:
+            nltk.download(download_name, quiet=True)
+
+setup_nltk()
 
 # ==========================================
 # 2. UTILITY FUNCTIONS (Preprocessing)
 # ==========================================
-stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 
 def get_wordnet_pos(tag):
@@ -45,16 +59,30 @@ def get_wordnet_pos(tag):
 
 def clean_text(text):
     if not isinstance(text, str): return ""
+    
+    # 1. Lowercase and remove punctuation
     text = text.lower()
     text = re.sub(r'[^\w\s]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
+    
+    # 2. Tokenize
     words = text.split()
-    words = [word for word in words if word not in stop_words]
+    
+    # 3. Remove Stopwords
+    # We load stopwords inside the function to ensure resource exists
+    stops = set(stopwords.words('english'))
+    words = [word for word in words if word not in stops]
+    
+    # 4. POS Tagging (This caused your error before, now fixed)
     pos_tags = pos_tag(words)
+    
+    # 5. Lemmatization
     lemmatized = [lemmatizer.lemmatize(word, get_wordnet_pos(tag)) for word, tag in pos_tags]
+    
     return ' '.join(lemmatized)
 
-# Custom Attention Layer (Must match the one in Notebook)
+# --- CUSTOM ATTENTION LAYER ---
+# Must exactly match the class used in the Jupyter Notebook training
 class Attention(Layer):
     def __init__(self, **kwargs):
         super(Attention, self).__init__(**kwargs)
@@ -69,8 +97,11 @@ class Attention(Layer):
         super(Attention, self).build(input_shape)
     
     def call(self, inputs):
+        # u_t = tanh(W.h + b)
         u_t = tf.tanh(tf.tensordot(inputs, self.W, axes=1) + self.b)
+        # attention scores
         att = tf.nn.softmax(tf.tensordot(u_t, self.u, axes=1), axis=1)
+        # weighted sum of inputs
         output = tf.reduce_sum(inputs * att, axis=1)
         return output
 
@@ -79,6 +110,17 @@ class Attention(Layer):
 # ==========================================
 @st.cache_resource
 def load_all_models():
+    # Helper to check if file exists
+    required_files = [
+        "processed_tickets.csv", "metadata.pkl", "tokenizer.pkl", 
+        "tfidf_vectorizer.pkl", "knn_cbr_model.pkl", "gru_solution_model.h5"
+    ]
+    
+    for f in required_files:
+        if not os.path.exists(f):
+            st.error(f"Missing file: {f}. Please run the export script in your notebook.")
+            st.stop()
+
     # Load Data
     df = pd.read_csv("processed_tickets.csv")
     
@@ -95,22 +137,19 @@ def load_all_models():
     tfidf = joblib.load("tfidf_vectorizer.pkl")
     knn = joblib.load("knn_cbr_model.pkl")
 
-    # Load GRU Model with Custom Layer
+    # Load GRU Model
     model = load_model("gru_solution_model.h5", custom_objects={'Attention': Attention})
     
     return df, max_len, tokenizer, tfidf, knn, model
 
-try:
-    df, max_len, tokenizer, tfidf, knn, model = load_all_models()
-    st.success("System ready. Models loaded successfully.")
-except Exception as e:
-    st.error(f"Error loading models. Make sure you ran the export script in the notebook! Error: {e}")
-    st.stop()
+# Load models once
+df, max_len, tokenizer, tfidf, knn, model = load_all_models()
 
 # ==========================================
 # 4. PREDICTION LOGIC
 # ==========================================
 def predict_solution_gru(text):
+    """Deep Learning prediction using GRU + Attention"""
     cleaned = clean_text(text)
     seq = tokenizer.texts_to_sequences([cleaned])
     pad = pad_sequences(seq, maxlen=max_len, padding='post')
@@ -124,6 +163,7 @@ def predict_solution_gru(text):
     return suggested_fix, confidence
 
 def get_similar_cases_knn(text, k=3):
+    """Case-Based Reasoning using KNN"""
     cleaned = clean_text(text)
     query_vec = tfidf.transform([cleaned])
     distances, indices = knn.kneighbors(query_vec, n_neighbors=k)
@@ -143,27 +183,34 @@ st.title("🤖 AI IT Helpdesk Assistant")
 st.markdown("Enter a ticket description below to get an AI-suggested solution or find similar historical cases.")
 
 # Input Area
-user_input = st.text_area("Describe the issue:", placeholder="e.g., My Outlook email is not syncing and asking for password")
+user_input = st.text_area("Describe the issue:", placeholder="e.g., My Outlook email is not syncing and asking for password", height=100)
 
-col1, col2 = st.columns(2)
+col1, col2 = st.columns([1, 1])
 
-if st.button("Analyze Ticket"):
+if st.button("Analyze Ticket", type="primary"):
     if not user_input:
         st.warning("Please enter a description first.")
     else:
         with st.spinner("Analyzing..."):
             
             # --- Method 1: Deep Learning Prediction ---
-            st.markdown("### 🧠 AI Recommended Solution (GRU Model)")
+            st.subheader("🧠 Recommended Solution (AI Model)")
             prediction, confidence = predict_solution_gru(user_input)
             
-            st.info(f"**Predicted Solution:**\n\n{prediction}")
-            st.caption(f"Model Confidence: {confidence:.2f}%")
+            # Visual indicator of confidence
+            if confidence > 80:
+                st.success(f"High Confidence: {confidence:.1f}%")
+            elif confidence > 50:
+                st.warning(f"Medium Confidence: {confidence:.1f}%")
+            else:
+                st.error(f"Low Confidence: {confidence:.1f}%")
+            
+            st.info(f"**Resolution Step:**\n\n{prediction}")
             
             st.markdown("---")
             
             # --- Method 2: Similar Cases (KNN) ---
-            st.markdown("### 📚 Similar Historical Cases (Case-Based Reasoning)")
+            st.subheader("📚 Similar Historical Cases")
             similar_cases = get_similar_cases_knn(user_input)
             
             for i, (sim, issue, sol) in enumerate(similar_cases):
@@ -171,14 +218,14 @@ if st.button("Analyze Ticket"):
                     st.markdown(f"**Original Issue:** {issue}")
                     st.markdown(f"**Resolution:** {sol}")
 
-# Sidebar info
+# Sidebar
 st.sidebar.header("System Stats")
 st.sidebar.metric("Total Historical Tickets", len(df))
 st.sidebar.markdown("### How it works")
 st.sidebar.info(
     """
-    **1. Classification:** A GRU Neural Network with Attention predicts the category of the issue and suggests the most common fix.
+    **1. Neural Network:** A GRU model understands the sequence of your words to predict the category of the problem.
     
-    **2. Search:** A KNN algorithm finds the closest matching tickets from the past using text similarity.
+    **2. Vector Search:** A KNN algorithm compares your text mathematically to thousands of past tickets to find the closest match.
     """
 )
